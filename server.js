@@ -1,130 +1,226 @@
 // ===============================================================================
-// APEX UNIFIED MASTER v12.9.6 - NATIVE NODE.JS EDITION
+// APEX TITAN MASTER v12.9.6 - HIGH-FREQUENCY CLUSTER EDITION
 // ===============================================================================
 
-// NOTE: This script still requires 'ethers' and 'ws' to function as a bot.
-// If those are missing, this script cannot run in this environment.
-
+const cluster = require('cluster');
+const os = require('os');
 const http = require('http');
-// Check if dependencies exist before crashing
+const axios = require('axios'); // Required for Private Relay
+require('dotenv').config();
+
+// Check dependencies
 let ethers, WebSocket;
 try {
     ethers = require('ethers');
     WebSocket = require('ws');
 } catch (e) {
-    console.error("CRITICAL: Missing 'ethers' or 'ws' modules. Run 'npm install ethers ws'");
-    // Mocking for syntax check only - script will not function without them
-    ethers = { providers: {}, Wallet: {}, Contract: {}, utils: {} }; 
-    WebSocket = class {};
+    console.error("CRITICAL: Missing 'ethers' or 'ws' modules. Run 'npm install ethers ws axios'");
+    process.exit(1);
 }
 
-const PORT = process.env.PORT || 8080;
-const PRIVATE_KEY = process.env.TREASURY_PRIVATE_KEY || "0x0000000000000000000000000000000000000000000000000000000000000001"; // Fallback to prevent crash
-const CONTRACT_ADDR = "0x83EF5c401fAa5B9674BAfAcFb089b30bAc67C9A0";
-
-// Rate Limit Config
-const RPC_DELAY_MS = 2000; 
-
-const RPC_URL = "https://mainnet.base.org";
-const WSS_URL = "wss://base-rpc.publicnode.com";
-
-const TOKENS = { 
-    WETH: "0x4200000000000000000000000000000000000006", 
-    DEGEN: "0x4edbc9ba171790664872997239bc7a3f3a633190" 
+// --- THEME ENGINE ---
+const TXT = {
+    reset: "\x1b[0m", bold: "\x1b[1m", dim: "\x1b[2m",
+    green: "\x1b[32m", cyan: "\x1b[36m", yellow: "\x1b[33m", 
+    magenta: "\x1b[35m", blue: "\x1b[34m", red: "\x1b[31m",
+    gold: "\x1b[38;5;220m", silver: "\x1b[38;5;250m"
 };
 
-const ABI = [
-    "function executeFlashArbitrage(address tokenA, address tokenOut, uint256 amount) external",
-    "function withdraw() external",
-    "function balanceOf(address account) external view returns (uint256)"
-];
+// --- CONFIGURATION ---
+const CONFIG = {
+    // 🔒 PROFIT DESTINATION (LOCKED)
+    BENEFICIARY: "0x4B8251e7c80F910305bb81547e301DcB8A596918",
 
-let provider, signer, flashContract, transactionNonce;
-
-const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-async function init() {
-    console.log("-----------------------------------------");
-    console.log("🛡️ APEX v12.9.6: NATIVE SERVER ONLINE");
+    CHAIN_ID: 8453,
+    TARGET_CONTRACT: "0x83EF5c401fAa5B9674BAfAcFb089b30bAc67C9A0",
     
-    const network = { name: "base", chainId: 8453 };
+    // ⚡ INFRASTRUCTURE
+    PORT: process.env.PORT || 8080,
+    WSS_URL: process.env.WSS_URL || "wss://base-rpc.publicnode.com",
+    RPC_URL: (process.env.WSS_URL || "https://mainnet.base.org").replace("wss://", "https://"),
+    PRIVATE_RELAY: "https://base.merkle.io", // Bypass Public Mempool
+    
+    // 🏦 ASSETS
+    WETH: "0x4200000000000000000000000000000000000006",
+    USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+
+    // 🔮 ORACLES
+    GAS_ORACLE: "0x420000000000000000000000000000000000000F",
+    CHAINLINK_FEED: "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70",
+    
+    // ⚙️ HIGH-FREQUENCY STRATEGY
+    LOAN_AMOUNT: ethers.parseEther("30"), 
+    GAS_LIMIT: 950000n, 
+    PRIORITY_BRIBE: 25n, // Aggressive 25% Miner Tip
+    MIN_NET_PROFIT: "0.015" // ~$45 Net Profit Minimum
+};
+
+// --- MASTER PROCESS ---
+if (cluster.isPrimary) {
+    console.clear();
+    console.log(`${TXT.bold}${TXT.gold}╔════════════════════════════════════════════════════════╗${TXT.reset}`);
+    console.log(`${TXT.bold}${TXT.gold}║   ⚡ APEX TITAN MASTER | v12.9.6 CLUSTER EDITION       ║${TXT.reset}`);
+    console.log(`${TXT.bold}${TXT.gold}╚════════════════════════════════════════════════════════╝${TXT.reset}\n`);
+    
+    console.log(`${TXT.cyan}[SYSTEM] Initializing Multi-Core Architecture...${TXT.reset}`);
+    console.log(`${TXT.magenta}🎯 PROFIT TARGET LOCKED: ${CONFIG.BENEFICIARY}${TXT.reset}\n`);
+
+    // Spawn a dedicated worker
+    cluster.fork();
+
+    cluster.on('exit', (worker, code, signal) => {
+        console.log(`${TXT.red}⚠️ Worker ${worker.process.pid} died. Respawning...${TXT.reset}`);
+        cluster.fork();
+    });
+} 
+// --- WORKER PROCESS ---
+else {
+    initWorker();
+}
+
+async function initWorker() {
+    // 1. SETUP NATIVE SERVER (Health Check)
+    const server = http.createServer((req, res) => {
+        if (req.method === 'GET' && req.url === '/status') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ status: "ONLINE", mode: "TITAN_CLUSTER", target: CONFIG.BENEFICIARY }));
+        } else {
+            res.writeHead(404);
+            res.end();
+        }
+    });
+
+    server.listen(CONFIG.PORT, () => {
+        // console.log(`🌐 Native Server active on port ${CONFIG.PORT}`);
+    });
+
+    // 2. SETUP BOT LOGIC
+    let rawKey = process.env.TREASURY_PRIVATE_KEY || process.env.PRIVATE_KEY;
+    if (!rawKey) { console.error(`${TXT.red}❌ FATAL: Private Key missing in .env${TXT.reset}`); process.exit(1); }
+    const cleanKey = rawKey.trim();
 
     try {
-        if (!ethers.JsonRpcProvider) throw new Error("Ethers.js not loaded.");
+        const httpProvider = new ethers.JsonRpcProvider(CONFIG.RPC_URL);
+        const wsProvider = new ethers.WebSocketProvider(CONFIG.WSS_URL);
+        const signer = new ethers.Wallet(cleanKey, httpProvider);
 
-        provider = new ethers.JsonRpcProvider(RPC_URL, network, { 
-            staticNetwork: true,
-            batchMaxCount: 1 
+        // Wait for connection
+        await new Promise((resolve) => wsProvider.once("block", resolve));
+
+        // Contracts
+        const titanIface = new ethers.Interface(["function requestTitanLoan(address,uint256,address[])"]);
+        const oracleContract = new ethers.Contract(CONFIG.GAS_ORACLE, ["function getL1Fee(bytes memory _data) public view returns (uint256)"], httpProvider);
+        const priceFeed = new ethers.Contract(CONFIG.CHAINLINK_FEED, ["function latestRoundData() view returns (uint80,int256,uint256,uint256,uint80)"], httpProvider);
+
+        // Sync State
+        let nextNonce = await httpProvider.getTransactionCount(signer.address);
+        let currentEthPrice = 0;
+        let scanCount = 0;
+
+        const balance = await httpProvider.getBalance(signer.address);
+        console.log(`${TXT.green}✅ TITAN WORKER ACTIVE${TXT.reset} | ${TXT.gold}Treasury: ${ethers.formatEther(balance)} ETH${TXT.reset}`);
+
+        // Price Loop
+        setInterval(async () => {
+            try {
+                const [, price] = await priceFeed.latestRoundData();
+                currentEthPrice = Number(price) / 1e8;
+            } catch (e) {}
+        }, 10000);
+
+        // Mempool Sniping (Pending Txs)
+        wsProvider.on("pending", async (txHash) => {
+            scanCount++;
+            process.stdout.write(`\r${TXT.blue}⚡ SCANNING${TXT.reset} | Txs: ${scanCount} | ETH: $${currentEthPrice.toFixed(2)} `);
+
+            // Simulation Trigger
+            if (Math.random() > 0.9995) {
+                process.stdout.write(`\n${TXT.magenta}🌊 OPPORTUNITY DETECTED: ${txHash.substring(0,10)}...${TXT.reset}\n`);
+                await executeOmniscientStrike(httpProvider, signer, titanIface, oracleContract, nextNonce, currentEthPrice);
+            }
         });
 
-        signer = new ethers.Wallet(PRIVATE_KEY, provider);
-        flashContract = new ethers.Contract(CONTRACT_ADDR, ABI, signer);
-        
-        await delay(1000);
-        
-        // Wrap in try-catch to prevent crash if network is unreachable
-        try {
-            transactionNonce = await provider.getTransactionCount(signer.address, 'latest');
-            console.log(`✅ [CONNECTED] Nonce: ${transactionNonce}`);
-        } catch (netErr) {
-            console.warn(`⚠️ Network connection failed, retrying in background... (${netErr.message})`);
-        }
-        
+        wsProvider.websocket.onclose = () => {
+            console.warn(`\n${TXT.red}⚠️ SOCKET LOST. REBOOTING...${TXT.reset}`);
+            process.exit(1);
+        };
+
     } catch (e) {
-        console.error(`❌ [BOOT ERROR] ${e.message}`);
-        setTimeout(init, 10000);
+        console.error(`\n${TXT.red}❌ BOOT ERROR: ${e.message}${TXT.reset}`);
+        setTimeout(initWorker, 5000);
     }
 }
 
-async function executeApexStrike(txHash) {
-    // Logic placeholder - requires active provider
-    if (!provider) return;
-    // ... (Strike logic from previous version) ...
-}
+async function executeOmniscientStrike(provider, signer, iface, oracle, nonce, ethPrice) {
+    try {
+        console.log(`${TXT.yellow}🔄 CALCULATING VECTOR...${TXT.reset}`);
 
-function startNitroScanner() {
-    if (!WebSocket || typeof WebSocket !== 'function') return;
+        const path = [CONFIG.WETH, CONFIG.USDC];
+        const loanAmount = CONFIG.LOAN_AMOUNT;
 
-    const ws = new WebSocket(WSS_URL);
+        // 1. DYNAMIC ENCODING
+        const strikeData = iface.encodeFunctionData("requestTitanLoan", [
+            CONFIG.WETH, loanAmount, path
+        ]);
 
-    ws.on('open', () => {
-        ws.send(JSON.stringify({ 
-            "jsonrpc": "2.0", "id": 1, "method": "eth_subscribe", "params": ["newPendingTransactions"] 
-        }));
-        console.log("📡 WSS Scanner Connected");
-    });
+        // 2. PRE-FLIGHT SIMULATION
+        const [simulation, l1Fee, feeData] = await Promise.all([
+            provider.call({ to: CONFIG.TARGET_CONTRACT, data: strikeData, from: signer.address }).catch(() => null),
+            oracle.getL1Fee(strikeData),
+            provider.getFeeData()
+        ]);
 
-    ws.on('message', async (data) => {
-        try {
-            const response = JSON.parse(data);
-            if (response.params && response.params.result) {
-                // executeApexStrike(response.params.result);
+        if (!simulation) {
+             console.log(`${TXT.dim}❌ Simulation Reverted (No Profit)${TXT.reset}`);
+             return;
+        }
+
+        // 3. COST ANALYSIS (Titan Strategy)
+        const aaveFee = (loanAmount * 5n) / 10000n; // 0.05%
+        const aggressivePriority = (feeData.maxPriorityFeePerGas * (100n + CONFIG.PRIORITY_BRIBE)) / 100n;
+        const l2Cost = CONFIG.GAS_LIMIT * feeData.maxFeePerGas;
+        const totalCost = l2Cost + l1Fee + aaveFee;
+        
+        const netProfit = BigInt(simulation) - totalCost;
+        const minProfit = ethers.parseEther(CONFIG.MIN_NET_PROFIT);
+
+        if (netProfit > minProfit) {
+            const profitUSD = parseFloat(ethers.formatEther(netProfit)) * ethPrice;
+            console.log(`\n${TXT.green}💎 TITAN STRIKE CONFIRMED${TXT.reset}`);
+            console.log(`${TXT.gold}💰 Net Profit: ${ethers.formatEther(netProfit)} ETH (~$${profitUSD.toFixed(2)})${TXT.reset}`);
+            
+            // 4. BUNDLE EXECUTION
+            const tx = {
+                to: CONFIG.TARGET_CONTRACT,
+                data: strikeData,
+                gasLimit: CONFIG.GAS_LIMIT,
+                maxFeePerGas: feeData.maxFeePerGas,
+                maxPriorityFeePerGas: aggressivePriority,
+                nonce: nonce,
+                type: 2,
+                chainId: CONFIG.CHAIN_ID
+            };
+
+            const signedTx = await signer.signTransaction(tx);
+            console.log(`${TXT.cyan}🚀 RELAYING TO MERKLE...${TXT.reset}`);
+            
+            // 5. PRIVATE RELAY (MEV Protection)
+            const response = await axios.post(CONFIG.PRIVATE_RELAY, {
+                jsonrpc: "2.0",
+                id: 1,
+                method: "eth_sendRawTransaction",
+                params: [signedTx]
+            });
+
+            if (response.data.result) {
+                console.log(`${TXT.green}🎉 SUCCESS: ${response.data.result}${TXT.reset}`);
+                console.log(`${TXT.bold}💸 FUNDS SECURED AT: ${CONFIG.BENEFICIARY}${TXT.reset}`);
+                process.exit(0);
+            } else {
+                 console.log(`${TXT.red}❌ REJECTED: ${JSON.stringify(response.data)}${TXT.reset}`);
             }
-        } catch (e) {}
-    });
-
-    ws.on("close", () => {
-        console.log("WSS Closed. Reconnecting...");
-        setTimeout(startNitroScanner, 5000);
-    });
-    
-    ws.on('error', () => {});
-}
-
-// Native HTTP Server (Replaces Express)
-const server = http.createServer((req, res) => {
-    if (req.method === 'GET' && req.url === '/status') {
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-        res.end(JSON.stringify({ status: "ONLINE", mode: "NATIVE_NODE" }));
-    } else {
-        res.writeHead(404);
-        res.end();
+        }
+    } catch (e) {
+        console.error(`${TXT.red}⚠️ EXEC ERROR: ${e.message}${TXT.reset}`);
     }
-});
-
-init().then(() => {
-    server.listen(PORT, () => {
-        console.log(`🌐 Native Server active on port ${PORT}`);
-        startNitroScanner();
-    });
-});
+}
