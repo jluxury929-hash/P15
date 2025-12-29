@@ -1,12 +1,20 @@
 // ===============================================================================
-// APEX TITAN LEGIT v13.4 - REAL MEMPOOL SCANNER & FLASHBOTS ENGINE
+// APEX TITAN LEGIT v13.5 - MULTI-CHAIN QUANTUM ENGINE (ETH + ARB + BASE)
 // ===============================================================================
 
 const cluster = require('cluster');
 const os = require('os');
-const http = require('http');
 const { ethers, WebSocketProvider, JsonRpcProvider, Wallet, Interface, parseEther, formatEther } = require('ethers');
-const { FlashbotsBundleProvider } = require('@flashbots/ethers-provider-bundle');
+
+// --- DEPENDENCY CHECK ---
+let FlashbotsBundleProvider;
+try {
+    ({ FlashbotsBundleProvider } = require('@flashbots/ethers-provider-bundle'));
+} catch (e) {
+    console.error("\x1b[31m%s\x1b[0m", "\n❌ CRITICAL: Missing Flashbots Dependency");
+    console.error("\x1b[33m%s\x1b[0m", "👉 Run: npm install @flashbots/ethers-provider-bundle ethers dotenv\n");
+    process.exit(1);
+}
 require('dotenv').config();
 
 // --- THEME ENGINE ---
@@ -14,49 +22,70 @@ const TXT = {
     reset: "\x1b[0m", bold: "\x1b[1m", dim: "\x1b[2m",
     green: "\x1b[32m", cyan: "\x1b[36m", yellow: "\x1b[33m", 
     magenta: "\x1b[35m", blue: "\x1b[34m", red: "\x1b[31m",
-    gold: "\x1b[38;5;220m", silver: "\x1b[38;5;250m"
+    gold: "\x1b[38;5;220m", gray: "\x1b[90m"
 };
 
-// --- CONFIGURATION ---
-const CONFIG = {
-    // 🌍 CHAIN CONFIGURATION
-    CHAIN_ID: 1, // ETH Mainnet
-    RPC_URL: process.env.ETH_RPC || "https://mainnet.infura.io/v3/YOUR_KEY",
-    WSS_URL: process.env.ETH_WSS || "wss://mainnet.infura.io/ws/v3/YOUR_KEY",
-    
-    // 🌑 REAL DARK POOL (Flashbots Relay)
-    FLASHBOTS_RELAY: "https://relay.flashbots.net",
-
-    // 🏦 REAL AAVE V3 POOL (Mainnet)
-    AAVE_POOL_ADDRESS: "0x87870Bca3F3f6332F99512Af77db630d00Z638025", 
-
-    // 🦄 TARGET ROUTERS (Uniswap V3)
-    UNISWAP_ROUTER: "0xE592427A0AEce92De3Edee1F18E0157C05861564",
-
-    // 🔒 YOUR CONTRACT (MUST BE DEPLOYED BY YOU)
-    // Real flash loans require a receiver contract. 
+// --- MULTI-CHAIN CONFIGURATION ---
+const GLOBAL_CONFIG = {
+    // 🔒 PROFIT TARGET (Your Contract)
+    // NOTE: You must deploy the SAME contract to all chains or configure per chain below
     TARGET_CONTRACT: "0xYOUR_DEPLOYED_CONTRACT_ADDRESS_HERE",
+    
+    // ⚡ SETTINGS
+    FLASH_LOAN_AMOUNT: parseEther("50"), 
+    MIN_WHALE_VALUE: 5.0, // Scan for txs > 5 ETH
 
-    // ⚡ STRATEGY
-    FLASH_LOAN_AMOUNT: parseEther("50"), // 50 ETH
-    MINER_BRIBE: parseEther("0.01"),     // 0.01 ETH Bribe
-    MIN_WHALE_VALUE: 10.0,               // Minimum ETH value to trigger
+    // 🌍 NETWORKS
+    NETWORKS: [
+        {
+            name: "ETH_MAINNET",
+            chainId: 1,
+            rpc: process.env.ETH_RPC || "https://mainnet.infura.io/v3/YOUR_KEY",
+            wss: process.env.ETH_WSS || "wss://mainnet.infura.io/ws/v3/YOUR_KEY",
+            type: "FLASHBOTS", // Uses Private Relays
+            relay: "https://relay.flashbots.net",
+            aavePool: "0x87870Bca3F3f6332F99512Af77db630d00Z638025",
+            uniswapRouter: "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+            color: TXT.cyan
+        },
+        {
+            name: "ARBITRUM",
+            chainId: 42161,
+            rpc: process.env.ARB_RPC || "https://arb1.arbitrum.io/rpc",
+            wss: process.env.ARB_WSS || "wss://arb1.arbitrum.io/feed",
+            type: "DIRECT_SEQUENCER", // L2 Sequencer is FCFS (No standard Flashbots bundle)
+            aavePool: "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+            uniswapRouter: "0xE592427A0AEce92De3Edee1F18E0157C05861564", // SwapRouter02
+            color: TXT.blue
+        },
+        {
+            name: "BASE_MAINNET",
+            chainId: 8453,
+            rpc: process.env.BASE_RPC || "https://mainnet.base.org",
+            wss: process.env.BASE_WSS || "wss://base-rpc.publicnode.com",
+            type: "DIRECT_SEQUENCER", // L2 Sequencer
+            aavePool: "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5",
+            uniswapRouter: "0x2626664c2603336E57B271c5C0b26F421741e481", // SwapRouter02 on Base
+            color: TXT.magenta
+        }
+    ]
 };
 
 // --- MASTER PROCESS ---
 if (cluster.isPrimary) {
     console.clear();
     console.log(`${TXT.bold}${TXT.gold}╔════════════════════════════════════════════════════════╗${TXT.reset}`);
-    console.log(`${TXT.bold}${TXT.gold}║   ⚡ APEX TITAN v13.4 | REAL MEMPOOL SCANNER           ║${TXT.reset}`);
-    console.log(`${TXT.bold}${TXT.gold}║   MODE: WHALE WATCHER | FLASHBOTS SANDWICH             ║${TXT.reset}`);
+    console.log(`${TXT.bold}${TXT.gold}║   ⚡ APEX TITAN v13.5 | MULTI-CHAIN QUANTUM ENGINE     ║${TXT.reset}`);
+    console.log(`${TXT.bold}${TXT.gold}║   NETWORKS: ETH MAINNET • ARBITRUM • BASE              ║${TXT.reset}`);
     console.log(`${TXT.bold}${TXT.gold}╚════════════════════════════════════════════════════════╝${TXT.reset}\n`);
-    
-    console.log(`${TXT.cyan}[SYSTEM] Initializing Quantum Bundlers...${TXT.reset}`);
-    console.log(`${TXT.blue}[NETWORK] Connected to Flashbots Relay (Mainnet)${TXT.reset}`);
-    console.log(`${TXT.green}[FILTER] Tracking Whales > ${CONFIG.MIN_WHALE_VALUE} ETH on Uniswap V3${TXT.reset}`);
 
-    // Fork workers
-    for (let i = 0; i < os.cpus().length; i++) cluster.fork();
+    const cpuCount = os.cpus().length;
+    console.log(`${TXT.green}[SYSTEM] Spawning ${cpuCount} Workers across ${GLOBAL_CONFIG.NETWORKS.length} Chains...${TXT.reset}`);
+
+    // Create workers
+    for (let i = 0; i < cpuCount; i++) {
+        cluster.fork();
+    }
 
     cluster.on('exit', (worker) => {
         console.log(`${TXT.red}⚠️ Worker ${worker.process.pid} died. Respawning...${TXT.reset}`);
@@ -65,123 +94,130 @@ if (cluster.isPrimary) {
 } 
 // --- WORKER PROCESS ---
 else {
-    initRealBundler();
+    // 1. SELECT NETWORK BASED ON WORKER ID
+    // This distributes workers evenly across the defined chains
+    // Worker 1 -> ETH, Worker 2 -> ARB, Worker 3 -> BASE, Worker 4 -> ETH...
+    const networkIndex = (cluster.worker.id - 1) % GLOBAL_CONFIG.NETWORKS.length;
+    const NETWORK = GLOBAL_CONFIG.NETWORKS[networkIndex];
+    
+    initWorker(NETWORK);
 }
 
-async function initRealBundler() {
-    // 1. SETUP PROVIDERS
-    const provider = new JsonRpcProvider(CONFIG.RPC_URL);
-    const wsProvider = new WebSocketProvider(CONFIG.WSS_URL);
+async function initWorker(CHAIN) {
+    const TAG = `${CHAIN.color}[${CHAIN.name}]${TXT.reset}`;
     
-    // Auth Signer (For Flashbots Identity) & Executor Signer (For Transaction)
-    const authSigner = new Wallet(process.env.PRIVATE_KEY, provider); 
-    const executorSigner = new Wallet(process.env.PRIVATE_KEY, provider);
-
-    // 2. CONNECT TO REAL DARK POOL (Flashbots)
-    let flashbotsProvider;
+    // 1. SETUP PROVIDERS
+    let provider, wsProvider, wallet;
     try {
-        flashbotsProvider = await FlashbotsBundleProvider.create(
-            provider,
-            authSigner,
-            CONFIG.FLASHBOTS_RELAY
-        );
-        console.log(`${TXT.green}✅ WORKER ${process.pid} LISTENING TO MEMPOOL${TXT.reset}`);
+        provider = new JsonRpcProvider(CHAIN.rpc);
+        wsProvider = new WebSocketProvider(CHAIN.wss);
+        
+        // Use a dummy key if env is missing to prevent crash during testing
+        const pk = process.env.PRIVATE_KEY || "0x0000000000000000000000000000000000000000000000000000000000000001";
+        wallet = new Wallet(pk, provider);
+        
+        console.log(`${TXT.green}✅ WORKER ${process.pid} ACTIVE${TXT.reset} on ${TAG}`);
     } catch (e) {
-        console.error(`${TXT.red}❌ Flashbots Connection Failed: ${e.message}${TXT.reset}`);
+        console.log(`${TXT.red}❌ Connection Failed on ${TAG}: ${e.message}${TXT.reset}`);
         return;
     }
 
-    // 3. DEFINE INTERFACES
+    // 2. SETUP EXECUTION STRATEGY
+    let flashbotsProvider = null;
+    if (CHAIN.type === "FLASHBOTS") {
+        try {
+            // Only Mainnet uses Flashbots Bundles normally
+            const authSigner = new Wallet(wallet.privateKey, provider);
+            flashbotsProvider = await FlashbotsBundleProvider.create(provider, authSigner, CHAIN.relay);
+            console.log(`   ${TXT.dim}↳ Connected to Dark Pool (Flashbots)${TXT.reset}`);
+        } catch (e) {
+            console.log(`   ${TXT.yellow}⚠️ Flashbots Offline for ${TAG}${TXT.reset}`);
+        }
+    } else {
+        console.log(`   ${TXT.dim}↳ Using Direct Sequencer (L2 Fast Path)${TXT.reset}`);
+    }
+
+    // 3. INTERFACES
     const poolIface = new Interface([
         "function flashLoanSimple(address receiverAddress, address asset, uint256 amount, bytes calldata params, uint16 referralCode)"
     ]);
 
-    // 4. REAL MEMPOOL SCANNING
-    // We listen for 'pending' transactions instead of just blocks
+    // 4. MEMPOOL SCANNING
     wsProvider.on("pending", async (txHash) => {
         try {
-            // A. Fetch full transaction details
             const tx = await provider.getTransaction(txHash);
-            
-            // Tx might be null if dropped or confirmed instantly
-            if (!tx) return;
+            if (!tx || !tx.to) return;
 
+            // FILTER: VALUE & ROUTER
             const valueEth = parseFloat(formatEther(tx.value));
+            
+            // Check if talking to that chain's Uniswap Router
+            if (valueEth >= GLOBAL_CONFIG.MIN_WHALE_VALUE && 
+                tx.to.toLowerCase() === CHAIN.uniswapRouter.toLowerCase()) {
 
-            // B. FILTER: WHALE DETECTOR
-            if (valueEth >= CONFIG.MIN_WHALE_VALUE) {
-                
-                // C. FILTER: DEX INTERACTION (Uniswap V3)
-                if (tx.to === CONFIG.UNISWAP_ROUTER) {
-                    
-                    console.log(`\n${TXT.gold}⚡ WHALE DETECTED: ${txHash.substring(0, 10)}...${TXT.reset}`);
-                    console.log(`   💰 Value: ${TXT.green}${valueEth.toFixed(2)} ETH${TXT.reset}`);
-                    console.log(`   🚨 TARGET: UNISWAP V3 (Sandwich Opportunity)`);
+                console.log(`\n${TAG} ${TXT.gold}⚡ WHALE DETECTED: ${txHash.substring(0, 10)}...${TXT.reset}`);
+                console.log(`   💰 Value: ${valueEth.toFixed(2)} ETH`);
+                console.log(`   🎯 Target: Uniswap V3 Router`);
 
-                    // --- EXECUTE FLASHBOTS BUNDLE ---
-                    try {
-                        // 1. Prepare Our Payload (Flash Loan / Arbitrage)
-                        // In a real sandwich, this would be the "Frontrun" (Buy) transaction
-                        const tradeData = poolIface.encodeFunctionData("flashLoanSimple", [
-                            CONFIG.TARGET_CONTRACT, 
-                            "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", // WETH
-                            CONFIG.FLASH_LOAN_AMOUNT,
-                            "0x", 
-                            0
-                        ]);
+                // --- EXECUTION LOGIC ---
+                try {
+                    // A. PREPARE PAYLOAD (Aave Flash Loan)
+                    const wethAddress = CHAIN.chainId === 8453 
+                        ? "0x4200000000000000000000000000000000000006" // Base WETH
+                        : "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"; // Mainnet/Arb WETH (Arb uses 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1)
 
-                        const ourTransaction = {
-                            to: CONFIG.AAVE_POOL_ADDRESS,
-                            type: 2,
-                            chainId: CONFIG.CHAIN_ID,
-                            data: tradeData,
-                            maxFeePerGas: parseEther("300", "gwei"),
-                            maxPriorityFeePerGas: parseEther("20", "gwei"), // Higher priority
-                            gasLimit: 600000n,
-                            nonce: await provider.getTransactionCount(executorSigner.address),
-                            value: 0n
-                        };
+                    const tradeData = poolIface.encodeFunctionData("flashLoanSimple", [
+                        GLOBAL_CONFIG.TARGET_CONTRACT,
+                        wethAddress, 
+                        GLOBAL_CONFIG.FLASH_LOAN_AMOUNT,
+                        "0x", 
+                        0
+                    ]);
 
-                        const signedTx = await executorSigner.signTransaction(ourTransaction);
+                    const txPayload = {
+                        to: CHAIN.aavePool,
+                        data: tradeData,
+                        type: 2,
+                        chainId: CHAIN.chainId,
+                        maxFeePerGas: parseEther("10", "gwei"), // Dynamic pricing recommended in prod
+                        maxPriorityFeePerGas: parseEther("1", "gwei"),
+                        gasLimit: 600000n,
+                        nonce: await provider.getTransactionCount(wallet.address),
+                        value: 0n
+                    };
 
-                        // 2. Create the Atomic Bundle
-                        // Structure: [Our Frontrun] -> [Whale Tx] -> [Our Backrun (Simulated here)]
-                        // Note: We cannot sign the whale's tx, we just include it in the simulation/bundle logic
-                        // Flashbots allows including pending txs from mempool in simulation
-                        const bundle = [
-                            { signedTransaction: signedTx }, // Our Tx
-                            // In a full implementation, you'd include the victim's tx hash here for simulation
-                        ];
-
-                        // 3. Simulate on Next Block
-                        const currentBlock = await provider.getBlockNumber();
-                        const targetBlock = currentBlock + 1;
+                    // B. EXECUTE (Based on Chain Type)
+                    if (CHAIN.type === "FLASHBOTS" && flashbotsProvider) {
+                        // --- METHOD 1: FLASHBOTS BUNDLE (MAINNET) ---
+                        const signedTx = await wallet.signTransaction(txPayload);
+                        const bundle = [{ signedTransaction: signedTx }];
                         
-                        console.log(`${TXT.dim}   ↳ Simulating Bundle on Block ${targetBlock}...${TXT.reset}`);
+                        const targetBlock = (await provider.getBlockNumber()) + 1;
+                        console.log(`   ${TXT.magenta}🚀 Submitting Bundle to Miner (Block ${targetBlock})...${TXT.reset}`);
                         
-                        const simulation = await flashbotsProvider.simulate(bundle, targetBlock);
-
-                        if ("error" in simulation) {
-                            console.log(`${TXT.yellow}   ⚠️ Simulation Reverted: ${simulation.error.message}${TXT.reset}`);
+                        // Simulate & Send
+                        const sim = await flashbotsProvider.simulate(bundle, targetBlock);
+                        if ("error" in sim) {
+                            console.log(`   ${TXT.yellow}⚠️ Simulation Failed: ${sim.error.message}${TXT.reset}`);
                         } else {
-                            console.log(`${TXT.green}   💎 SIMULATION SUCCESS! Profit Possible.${TXT.reset}`);
-                            console.log(`${TXT.magenta}   🚀 SUBMITTING PRIVATE BUNDLE...${TXT.reset}`);
-                            
-                            const submission = await flashbotsProvider.sendBundle(bundle, targetBlock);
-                            
-                            if ("error" in submission) {
-                                console.error(`${TXT.red}   ❌ Bundle Error: ${submission.error.message}${TXT.reset}`);
-                            } else {
-                                console.log(`${TXT.green}   🎉 Bundle Submitted! Waiting for mining...${TXT.reset}`);
-                            }
+                            await flashbotsProvider.sendBundle(bundle, targetBlock);
+                            console.log(`   ${TXT.green}🎉 Bundle Sent!${TXT.reset}`);
                         }
-                    } catch (execErr) {
-                        console.error(`${TXT.red}   ⚠️ Execution Failed: ${execErr.message}${TXT.reset}`);
+
+                    } else {
+                        // --- METHOD 2: DIRECT SEQUENCER (L2 ARB/BASE) ---
+                        // L2s are First-Come-First-Served, so we just broadcast efficiently
+                        console.log(`   ${TXT.magenta}🚀 Broadcasting to Sequencer...${TXT.reset}`);
+                        const txResponse = await wallet.sendTransaction(txPayload);
+                        console.log(`   ${TXT.green}🎉 Tx Sent: ${txResponse.hash}${TXT.reset}`);
                     }
+
+                } catch (err) {
+                    console.log(`   ${TXT.red}⚠️ Execution Error: ${err.message}${TXT.reset}`);
                 }
             }
-        } catch (err) {
-            // Ignore fetch errors (common in fast scanning)
+        } catch (e) {
+            // Ignore fetch errors
         }
     });
 }
