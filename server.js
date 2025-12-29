@@ -44,7 +44,8 @@ const CONFIG = {
     TARGET_CONTRACT: "0x83EF5c401fAa5B9674BAfAcFb089b30bAc67C9A0",
     
     // ⚡ INFRASTRUCTURE
-    PORT: process.env.PORT || 8080,
+    // FIX: Ensure PORT is parsed as an integer to avoid string concatenation errors
+    PORT: parseInt(process.env.PORT || "8080"),
     PRIVATE_RELAY: "https://base.merkle.io", // Bypass Public Mempool
     
     // 🏦 ASSETS (BASE DEFAULTS)
@@ -103,7 +104,9 @@ async function initQuantumWorker() {
         }
     });
 
-    server.listen(CONFIG.PORT + cluster.worker.id, () => {
+    // FIX: Calculate numeric port correctly
+    const workerPort = CONFIG.PORT + (cluster.worker ? cluster.worker.id : 0);
+    server.listen(workerPort, () => {
         // Silent start
     });
 
