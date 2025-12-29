@@ -42,8 +42,9 @@ const GLOBAL_CONFIG = {
         {
             name: "ETH_MAINNET",
             chainId: 1,
-            rpc: process.env.ETH_RPC || "https://mainnet.infura.io/v3/YOUR_KEY",
-            wss: process.env.ETH_WSS || "wss://mainnet.infura.io/ws/v3/YOUR_KEY",
+            // 🛠️ FIXED: Switched to Public Endpoints to prevent 401 Errors if no .env key provided
+            rpc: process.env.ETH_RPC || "https://eth.llamarpc.com",
+            wss: process.env.ETH_WSS || "wss://ethereum-rpc.publicnode.com", 
             type: "FLASHBOTS", // Uses Private Relays
             relay: "https://relay.flashbots.net",
             aavePool: "0x87870Bca3F3f6332F99512Af77db630d00Z638025",
@@ -111,6 +112,18 @@ async function initWorker(CHAIN) {
     try {
         provider = new JsonRpcProvider(CHAIN.rpc);
         wsProvider = new WebSocketProvider(CHAIN.wss);
+
+        // 🛠️ CRASH FIX: Handle WebSocket Errors Gracefully
+        // If the API key is invalid or connection drops, this prevents the process from crashing
+        if (wsProvider.websocket) {
+            wsProvider.websocket.onerror = (err) => {
+                console.error(`${TXT.red}❌ [WS ERROR] ${TAG}: Connection failed (Check URL/Key).${TXT.reset}`);
+            };
+            wsProvider.websocket.onclose = () => {
+                console.log(`${TXT.yellow}⚠️ [WS CLOSED] ${TAG}: Reconnecting...${TXT.reset}`);
+                process.exit(0); // Exit cleanly so cluster respawns
+            };
+        }
         
         const pk = process.env.PRIVATE_KEY || "0x0000000000000000000000000000000000000000000000000000000000000001";
         wallet = new Wallet(pk, provider);
