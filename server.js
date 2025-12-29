@@ -161,6 +161,14 @@ async function initWorker(CHAIN) {
         
         // Add error listener to prevent crash on connection loss
         wsProvider.on('error', (error) => {
+            // 🛠️ FIX: Suppress Arbitrum's "Unexpected Message" errors (Sequencer Feed Noise)
+            // These are valid L2 headers that Ethers.js doesn't recognize as standard JSON-RPC
+            if (error && error.message && (
+                error.message.includes("UNEXPECTED_MESSAGE") || 
+                error.message.includes("delayedMessagesRead")
+            )) {
+                return; // Ignore safe Arbitrum noise
+            }
             console.error(`${TXT.yellow}⚠️ [WS ERROR] ${TAG}: ${error.message}${TXT.reset}`);
         });
 
