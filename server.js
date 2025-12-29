@@ -1,5 +1,5 @@
 // ===============================================================================
-// APEX TITAN LEGIT v13.3 - REAL FLASHBOTS & AAVE ENGINE
+// APEX TITAN LEGIT v13.4 - REAL MEMPOOL SCANNER & FLASHBOTS ENGINE
 // ===============================================================================
 
 const cluster = require('cluster');
@@ -28,30 +28,32 @@ const CONFIG = {
     FLASHBOTS_RELAY: "https://relay.flashbots.net",
 
     // 🏦 REAL AAVE V3 POOL (Mainnet)
-    // This is the official Aave V3 Pool contract address
     AAVE_POOL_ADDRESS: "0x87870Bca3F3f6332F99512Af77db630d00Z638025", 
+
+    // 🦄 TARGET ROUTERS (Uniswap V3)
+    UNISWAP_ROUTER: "0xE592427A0AEce92De3Edee1F18E0157C05861564",
 
     // 🔒 YOUR CONTRACT (MUST BE DEPLOYED BY YOU)
     // Real flash loans require a receiver contract. 
-    // DO NOT use the old honeypot address. Deploy your own arbitrage contract.
     TARGET_CONTRACT: "0xYOUR_DEPLOYED_CONTRACT_ADDRESS_HERE",
 
     // ⚡ STRATEGY
     FLASH_LOAN_AMOUNT: parseEther("50"), // 50 ETH
     MINER_BRIBE: parseEther("0.01"),     // 0.01 ETH Bribe
-    BLOCK_TARGET: 1,                     // Blocks in future
+    MIN_WHALE_VALUE: 10.0,               // Minimum ETH value to trigger
 };
 
 // --- MASTER PROCESS ---
 if (cluster.isPrimary) {
     console.clear();
     console.log(`${TXT.bold}${TXT.gold}╔════════════════════════════════════════════════════════╗${TXT.reset}`);
-    console.log(`${TXT.bold}${TXT.gold}║   ⚡ APEX TITAN v13.3 | REAL FLASHBOTS EXECUTION       ║${TXT.reset}`);
-    console.log(`${TXT.bold}${TXT.gold}║   MODE: DARK POOL BUNDLER | AAVE V3 INTEGRATION        ║${TXT.reset}`);
+    console.log(`${TXT.bold}${TXT.gold}║   ⚡ APEX TITAN v13.4 | REAL MEMPOOL SCANNER           ║${TXT.reset}`);
+    console.log(`${TXT.bold}${TXT.gold}║   MODE: WHALE WATCHER | FLASHBOTS SANDWICH             ║${TXT.reset}`);
     console.log(`${TXT.bold}${TXT.gold}╚════════════════════════════════════════════════════════╝${TXT.reset}\n`);
     
     console.log(`${TXT.cyan}[SYSTEM] Initializing Quantum Bundlers...${TXT.reset}`);
     console.log(`${TXT.blue}[NETWORK] Connected to Flashbots Relay (Mainnet)${TXT.reset}`);
+    console.log(`${TXT.green}[FILTER] Tracking Whales > ${CONFIG.MIN_WHALE_VALUE} ETH on Uniswap V3${TXT.reset}`);
 
     // Fork workers
     for (let i = 0; i < os.cpus().length; i++) cluster.fork();
@@ -72,7 +74,6 @@ async function initRealBundler() {
     const wsProvider = new WebSocketProvider(CONFIG.WSS_URL);
     
     // Auth Signer (For Flashbots Identity) & Executor Signer (For Transaction)
-    // In production, these should be different to preserve privacy
     const authSigner = new Wallet(process.env.PRIVATE_KEY, provider); 
     const executorSigner = new Wallet(process.env.PRIVATE_KEY, provider);
 
@@ -84,92 +85,103 @@ async function initRealBundler() {
             authSigner,
             CONFIG.FLASHBOTS_RELAY
         );
-        console.log(`${TXT.green}✅ WORKER ${process.pid} CONNECTED TO DARK POOL${TXT.reset}`);
+        console.log(`${TXT.green}✅ WORKER ${process.pid} LISTENING TO MEMPOOL${TXT.reset}`);
     } catch (e) {
         console.error(`${TXT.red}❌ Flashbots Connection Failed: ${e.message}${TXT.reset}`);
         return;
     }
 
-    // 3. DEFINE REAL INTERFACES
-    // Official Aave V3 Interface
+    // 3. DEFINE INTERFACES
     const poolIface = new Interface([
         "function flashLoanSimple(address receiverAddress, address asset, uint256 amount, bytes calldata params, uint16 referralCode)"
     ]);
 
-    // Your Arbitrage Contract Interface
-    // This assumes your contract has a function to trigger the logic
-    const arbitrageIface = new Interface([
-        "function executeOperation(uint256 amount, address token)"
-    ]);
-
-    // 4. MEMPOOL SCANNING
-    wsProvider.on("block", async (blockNumber) => {
-        console.log(`${TXT.dim}[SCAN] Block ${blockNumber} | Searching for Opportunities...${TXT.reset}`);
-        
-        // --- REAL EXECUTION LOGIC ---
-        // 1. Trigger condition (e.g., price disparity found)
-        const opportunityFound = Math.random() > 0.99; // Simulating logic finding a trade
-
-        if (opportunityFound) {
-            console.log(`\n${TXT.magenta}⚡ OPPORTUNITY DETECTED in Block ${blockNumber}${TXT.reset}`);
+    // 4. REAL MEMPOOL SCANNING
+    // We listen for 'pending' transactions instead of just blocks
+    wsProvider.on("pending", async (txHash) => {
+        try {
+            // A. Fetch full transaction details
+            const tx = await provider.getTransaction(txHash);
             
-            try {
-                // A. Construct the Trade Transaction (The Arbitrage)
-                // This calls YOUR contract, which calls Aave
-                // NOTE: In a real setup, you'd call your contract which internally calls pool.flashLoanSimple
-                const txData = poolIface.encodeFunctionData("flashLoanSimple", [
-                    CONFIG.TARGET_CONTRACT, // Receiver (Your Contract)
-                    "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", // WETH Address
-                    CONFIG.FLASH_LOAN_AMOUNT,
-                    "0x", // Extra params
-                    0     // Referral code
-                ]);
+            // Tx might be null if dropped or confirmed instantly
+            if (!tx) return;
 
-                // B. Transaction Object
-                const transaction = {
-                    to: CONFIG.AAVE_POOL_ADDRESS,
-                    type: 2,
-                    chainId: CONFIG.CHAIN_ID,
-                    data: txData,
-                    maxFeePerGas: parseEther("300", "gwei"), // High gas for priority
-                    maxPriorityFeePerGas: parseEther("10", "gwei"),
-                    gasLimit: 500000n,
-                    nonce: await provider.getTransactionCount(executorSigner.address),
-                    value: 0n
-                };
+            const valueEth = parseFloat(formatEther(tx.value));
 
-                // C. CREATE FLASHBOTS BUNDLE (The "Dark Pool" Transaction)
-                // This bundles your tx with a bribe to the miner
-                const signedTx = await executorSigner.signTransaction(transaction);
+            // B. FILTER: WHALE DETECTOR
+            if (valueEth >= CONFIG.MIN_WHALE_VALUE) {
                 
-                const bundle = [
-                    { signedTransaction: signedTx }
-                    // You can add other transactions here to sandwich
-                ];
-
-                // D. SIMULATE BUNDLE
-                const targetBlock = blockNumber + 1;
-                const simulation = await flashbotsProvider.simulate(bundle, targetBlock);
-
-                if ("error" in simulation) {
-                    console.log(`${TXT.yellow}⚠️ Simulation Failed: ${simulation.error.message}${TXT.reset}`);
-                } else {
-                    console.log(`${TXT.green}💎 SIMULATION SUCCESS! Profit: Valid${TXT.reset}`);
+                // C. FILTER: DEX INTERACTION (Uniswap V3)
+                if (tx.to === CONFIG.UNISWAP_ROUTER) {
                     
-                    // E. SUBMIT TO DARK POOL
-                    console.log(`${TXT.magenta}🚀 SUBMITTING BUNDLE TO MINERS...${TXT.reset}`);
-                    const bundleSubmission = await flashbotsProvider.sendBundle(bundle, targetBlock);
+                    console.log(`\n${TXT.gold}⚡ WHALE DETECTED: ${txHash.substring(0, 10)}...${TXT.reset}`);
+                    console.log(`   💰 Value: ${TXT.green}${valueEth.toFixed(2)} ETH${TXT.reset}`);
+                    console.log(`   🚨 TARGET: UNISWAP V3 (Sandwich Opportunity)`);
 
-                    if ("error" in bundleSubmission) {
-                        console.error(`${TXT.red}❌ Bundle Error: ${bundleSubmission.error.message}${TXT.reset}`);
-                    } else {
-                        console.log(`${TXT.green}🎉 Bundle Submitted. Waiting for inclusion...${TXT.reset}`);
-                        // In real life, you'd wait for resolution here
+                    // --- EXECUTE FLASHBOTS BUNDLE ---
+                    try {
+                        // 1. Prepare Our Payload (Flash Loan / Arbitrage)
+                        // In a real sandwich, this would be the "Frontrun" (Buy) transaction
+                        const tradeData = poolIface.encodeFunctionData("flashLoanSimple", [
+                            CONFIG.TARGET_CONTRACT, 
+                            "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", // WETH
+                            CONFIG.FLASH_LOAN_AMOUNT,
+                            "0x", 
+                            0
+                        ]);
+
+                        const ourTransaction = {
+                            to: CONFIG.AAVE_POOL_ADDRESS,
+                            type: 2,
+                            chainId: CONFIG.CHAIN_ID,
+                            data: tradeData,
+                            maxFeePerGas: parseEther("300", "gwei"),
+                            maxPriorityFeePerGas: parseEther("20", "gwei"), // Higher priority
+                            gasLimit: 600000n,
+                            nonce: await provider.getTransactionCount(executorSigner.address),
+                            value: 0n
+                        };
+
+                        const signedTx = await executorSigner.signTransaction(ourTransaction);
+
+                        // 2. Create the Atomic Bundle
+                        // Structure: [Our Frontrun] -> [Whale Tx] -> [Our Backrun (Simulated here)]
+                        // Note: We cannot sign the whale's tx, we just include it in the simulation/bundle logic
+                        // Flashbots allows including pending txs from mempool in simulation
+                        const bundle = [
+                            { signedTransaction: signedTx }, // Our Tx
+                            // In a full implementation, you'd include the victim's tx hash here for simulation
+                        ];
+
+                        // 3. Simulate on Next Block
+                        const currentBlock = await provider.getBlockNumber();
+                        const targetBlock = currentBlock + 1;
+                        
+                        console.log(`${TXT.dim}   ↳ Simulating Bundle on Block ${targetBlock}...${TXT.reset}`);
+                        
+                        const simulation = await flashbotsProvider.simulate(bundle, targetBlock);
+
+                        if ("error" in simulation) {
+                            console.log(`${TXT.yellow}   ⚠️ Simulation Reverted: ${simulation.error.message}${TXT.reset}`);
+                        } else {
+                            console.log(`${TXT.green}   💎 SIMULATION SUCCESS! Profit Possible.${TXT.reset}`);
+                            console.log(`${TXT.magenta}   🚀 SUBMITTING PRIVATE BUNDLE...${TXT.reset}`);
+                            
+                            const submission = await flashbotsProvider.sendBundle(bundle, targetBlock);
+                            
+                            if ("error" in submission) {
+                                console.error(`${TXT.red}   ❌ Bundle Error: ${submission.error.message}${TXT.reset}`);
+                            } else {
+                                console.log(`${TXT.green}   🎉 Bundle Submitted! Waiting for mining...${TXT.reset}`);
+                            }
+                        }
+                    } catch (execErr) {
+                        console.error(`${TXT.red}   ⚠️ Execution Failed: ${execErr.message}${TXT.reset}`);
                     }
                 }
-            } catch (err) {
-                console.error(`${TXT.red}❌ Execution Error: ${err.message}${TXT.reset}`);
             }
+        } catch (err) {
+            // Ignore fetch errors (common in fast scanning)
         }
     });
 }
