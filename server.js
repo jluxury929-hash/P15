@@ -1,5 +1,5 @@
 // ===============================================================================
-// APEX TITAN LEGIT v13.5 - MULTI-CHAIN QUANTUM ENGINE (ETH + ARB + BASE)
+// APEX TITAN LEGIT v13.6 - MULTI-CHAIN QUANTUM ENGINE (ETH + ARB + BASE)
 // ===============================================================================
 
 const cluster = require('cluster');
@@ -8,12 +8,14 @@ const { ethers, WebSocketProvider, JsonRpcProvider, Wallet, Interface, parseEthe
 
 // --- DEPENDENCY CHECK ---
 let FlashbotsBundleProvider;
+let hasFlashbots = false;
 try {
     ({ FlashbotsBundleProvider } = require('@flashbots/ethers-provider-bundle'));
+    hasFlashbots = true;
 } catch (e) {
-    console.error("\x1b[31m%s\x1b[0m", "\n❌ CRITICAL: Missing Flashbots Dependency");
-    console.error("\x1b[33m%s\x1b[0m", "👉 Run: npm install @flashbots/ethers-provider-bundle ethers dotenv\n");
-    process.exit(1);
+    console.error("\x1b[33m%s\x1b[0m", "\n⚠️ WARNING: Flashbots dependency missing. Mainnet bundling disabled.");
+    console.error("\x1b[33m%s\x1b[0m", "👉 Install with: npm install @flashbots/ethers-provider-bundle ethers dotenv\n");
+    // We do NOT exit here anymore to prevent crash loops in containers
 }
 require('dotenv').config();
 
@@ -75,7 +77,7 @@ const GLOBAL_CONFIG = {
 if (cluster.isPrimary) {
     console.clear();
     console.log(`${TXT.bold}${TXT.gold}╔════════════════════════════════════════════════════════╗${TXT.reset}`);
-    console.log(`${TXT.bold}${TXT.gold}║   ⚡ APEX TITAN v13.5 | MULTI-CHAIN QUANTUM ENGINE     ║${TXT.reset}`);
+    console.log(`${TXT.bold}${TXT.gold}║   ⚡ APEX TITAN v13.6 | MULTI-CHAIN QUANTUM ENGINE     ║${TXT.reset}`);
     console.log(`${TXT.bold}${TXT.gold}║   NETWORKS: ETH MAINNET • ARBITRUM • BASE              ║${TXT.reset}`);
     console.log(`${TXT.bold}${TXT.gold}╚════════════════════════════════════════════════════════╝${TXT.reset}\n`);
 
@@ -95,8 +97,6 @@ if (cluster.isPrimary) {
 // --- WORKER PROCESS ---
 else {
     // 1. SELECT NETWORK BASED ON WORKER ID
-    // This distributes workers evenly across the defined chains
-    // Worker 1 -> ETH, Worker 2 -> ARB, Worker 3 -> BASE, Worker 4 -> ETH...
     const networkIndex = (cluster.worker.id - 1) % GLOBAL_CONFIG.NETWORKS.length;
     const NETWORK = GLOBAL_CONFIG.NETWORKS[networkIndex];
     
@@ -112,7 +112,6 @@ async function initWorker(CHAIN) {
         provider = new JsonRpcProvider(CHAIN.rpc);
         wsProvider = new WebSocketProvider(CHAIN.wss);
         
-        // Use a dummy key if env is missing to prevent crash during testing
         const pk = process.env.PRIVATE_KEY || "0x0000000000000000000000000000000000000000000000000000000000000001";
         wallet = new Wallet(pk, provider);
         
@@ -125,13 +124,16 @@ async function initWorker(CHAIN) {
     // 2. SETUP EXECUTION STRATEGY
     let flashbotsProvider = null;
     if (CHAIN.type === "FLASHBOTS") {
-        try {
-            // Only Mainnet uses Flashbots Bundles normally
-            const authSigner = new Wallet(wallet.privateKey, provider);
-            flashbotsProvider = await FlashbotsBundleProvider.create(provider, authSigner, CHAIN.relay);
-            console.log(`   ${TXT.dim}↳ Connected to Dark Pool (Flashbots)${TXT.reset}`);
-        } catch (e) {
-            console.log(`   ${TXT.yellow}⚠️ Flashbots Offline for ${TAG}${TXT.reset}`);
+        if (hasFlashbots) {
+            try {
+                const authSigner = new Wallet(wallet.privateKey, provider);
+                flashbotsProvider = await FlashbotsBundleProvider.create(provider, authSigner, CHAIN.relay);
+                console.log(`   ${TXT.dim}↳ Connected to Dark Pool (Flashbots)${TXT.reset}`);
+            } catch (e) {
+                console.log(`   ${TXT.yellow}⚠️ Flashbots Offline for ${TAG}${TXT.reset}`);
+            }
+        } else {
+            console.log(`   ${TXT.yellow}⚠️ Mainnet Bundles Disabled (Missing Lib)${TXT.reset}`);
         }
     } else {
         console.log(`   ${TXT.dim}↳ Using Direct Sequencer (L2 Fast Path)${TXT.reset}`);
@@ -148,10 +150,8 @@ async function initWorker(CHAIN) {
             const tx = await provider.getTransaction(txHash);
             if (!tx || !tx.to) return;
 
-            // FILTER: VALUE & ROUTER
             const valueEth = parseFloat(formatEther(tx.value));
             
-            // Check if talking to that chain's Uniswap Router
             if (valueEth >= GLOBAL_CONFIG.MIN_WHALE_VALUE && 
                 tx.to.toLowerCase() === CHAIN.uniswapRouter.toLowerCase()) {
 
@@ -159,12 +159,10 @@ async function initWorker(CHAIN) {
                 console.log(`   💰 Value: ${valueEth.toFixed(2)} ETH`);
                 console.log(`   🎯 Target: Uniswap V3 Router`);
 
-                // --- EXECUTION LOGIC ---
                 try {
-                    // A. PREPARE PAYLOAD (Aave Flash Loan)
                     const wethAddress = CHAIN.chainId === 8453 
-                        ? "0x4200000000000000000000000000000000000006" // Base WETH
-                        : "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"; // Mainnet/Arb WETH (Arb uses 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1)
+                        ? "0x4200000000000000000000000000000000000006" 
+                        : "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"; 
 
                     const tradeData = poolIface.encodeFunctionData("flashLoanSimple", [
                         GLOBAL_CONFIG.TARGET_CONTRACT,
@@ -179,34 +177,32 @@ async function initWorker(CHAIN) {
                         data: tradeData,
                         type: 2,
                         chainId: CHAIN.chainId,
-                        maxFeePerGas: parseEther("10", "gwei"), // Dynamic pricing recommended in prod
+                        maxFeePerGas: parseEther("10", "gwei"),
                         maxPriorityFeePerGas: parseEther("1", "gwei"),
                         gasLimit: 600000n,
                         nonce: await provider.getTransactionCount(wallet.address),
                         value: 0n
                     };
 
-                    // B. EXECUTE (Based on Chain Type)
-                    if (CHAIN.type === "FLASHBOTS" && flashbotsProvider) {
-                        // --- METHOD 1: FLASHBOTS BUNDLE (MAINNET) ---
-                        const signedTx = await wallet.signTransaction(txPayload);
-                        const bundle = [{ signedTransaction: signedTx }];
-                        
-                        const targetBlock = (await provider.getBlockNumber()) + 1;
-                        console.log(`   ${TXT.magenta}🚀 Submitting Bundle to Miner (Block ${targetBlock})...${TXT.reset}`);
-                        
-                        // Simulate & Send
-                        const sim = await flashbotsProvider.simulate(bundle, targetBlock);
-                        if ("error" in sim) {
-                            console.log(`   ${TXT.yellow}⚠️ Simulation Failed: ${sim.error.message}${TXT.reset}`);
+                    if (CHAIN.type === "FLASHBOTS") {
+                        if (flashbotsProvider) {
+                            const signedTx = await wallet.signTransaction(txPayload);
+                            const bundle = [{ signedTransaction: signedTx }];
+                            const targetBlock = (await provider.getBlockNumber()) + 1;
+                            
+                            console.log(`   ${TXT.magenta}🚀 Submitting Bundle...${TXT.reset}`);
+                            const sim = await flashbotsProvider.simulate(bundle, targetBlock);
+                            
+                            if ("error" in sim) {
+                                console.log(`   ${TXT.yellow}⚠️ Simulation Failed: ${sim.error.message}${TXT.reset}`);
+                            } else {
+                                await flashbotsProvider.sendBundle(bundle, targetBlock);
+                                console.log(`   ${TXT.green}🎉 Bundle Sent!${TXT.reset}`);
+                            }
                         } else {
-                            await flashbotsProvider.sendBundle(bundle, targetBlock);
-                            console.log(`   ${TXT.green}🎉 Bundle Sent!${TXT.reset}`);
+                            console.log(`   ${TXT.dim}ℹ️ Skipping (Flashbots not ready)${TXT.reset}`);
                         }
-
                     } else {
-                        // --- METHOD 2: DIRECT SEQUENCER (L2 ARB/BASE) ---
-                        // L2s are First-Come-First-Served, so we just broadcast efficiently
                         console.log(`   ${TXT.magenta}🚀 Broadcasting to Sequencer...${TXT.reset}`);
                         const txResponse = await wallet.sendTransaction(txPayload);
                         console.log(`   ${TXT.green}🎉 Tx Sent: ${txResponse.hash}${TXT.reset}`);
