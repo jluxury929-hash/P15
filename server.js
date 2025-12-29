@@ -13,9 +13,11 @@ try {
     ({ FlashbotsBundleProvider } = require('@flashbots/ethers-provider-bundle'));
     hasFlashbots = true;
 } catch (e) {
-    console.error("\x1b[33m%s\x1b[0m", "\n⚠️ WARNING: Flashbots dependency missing. Mainnet bundling disabled.");
-    console.error("\x1b[33m%s\x1b[0m", "👉 Install with: npm install @flashbots/ethers-provider-bundle ethers dotenv\n");
-    // We do NOT exit here anymore to prevent crash loops in containers
+    // 🛠️ FIX: Only log warning in Primary process to prevent console flooding with 48+ workers
+    if (cluster.isPrimary) {
+        console.error("\x1b[33m%s\x1b[0m", "\n⚠️ WARNING: Flashbots dependency missing. Mainnet bundling disabled.");
+        console.error("\x1b[33m%s\x1b[0m", "👉 Install with: npm install @flashbots/ethers-provider-bundle ethers dotenv\n");
+    }
 }
 require('dotenv').config();
 
