@@ -1,5 +1,5 @@
 // ===============================================================================
-// APEX TITAN v65.5 (OMNISCIENT CLUSTER MERGE) - HIGH-FREQUENCY ENGINE
+// APEX TITAN v65.6 (STABILIZED & VALIDATED) - HIGH-FREQUENCY ENGINE
 // ===============================================================================
 
 const cluster = require('cluster');
@@ -9,16 +9,26 @@ const axios = require('axios');
 const { ethers, Wallet, WebSocketProvider, JsonRpcProvider, Contract, formatEther, parseEther, Interface, AbiCoder } = require('ethers');
 require('dotenv').config();
 
-// --- NOISE SUPPRESSION: Aggressive suppression of RPC handshake noise ---
+// --- NOISE SUPPRESSION: Suppresses specific RPC errors to prevent log flooding ---
 process.on('uncaughtException', (err) => {
     const msg = err.message || "";
     if (msg.includes('429') || msg.includes('network') || msg.includes('coalesce') || msg.includes('subscribe') || msg.includes('infura')) return; 
+    
+    // Catch 401/405 specifically for better feedback
+    if (msg.includes('401')) {
+        console.error("\n\x1b[31m[AUTH ERROR] 401 Unauthorized: Your RPC API Key is invalid or missing in .env\x1b[0m");
+        return;
+    }
+    if (msg.includes('405')) {
+        console.error("\n\x1b[31m[RPC ERROR] 405 Method Not Allowed: Endpoint mismatch or restricted method.\x1b[0m");
+        return;
+    }
     console.error("\n\x1b[31m[SYSTEM ERROR]\x1b[0m", msg);
 });
 
 process.on('unhandledRejection', (reason) => {
     const msg = reason?.message || "";
-    if (msg.includes('429') || msg.includes('network') || msg.includes('coalesce') || msg.includes('subscribe') || msg.includes('infura')) return;
+    if (msg.includes('429') || msg.includes('network') || msg.includes('coalesce') || msg.includes('401') || msg.includes('405')) return;
 });
 
 // --- FLASHBOTS INTEGRATION ---
@@ -38,12 +48,12 @@ const TXT = {
     gold: "\x1b[38;5;220m"
 };
 
-// --- MERGED CONFIGURATION ---
+// --- CONFIGURATION ---
 const GLOBAL_CONFIG = {
     TARGET_CONTRACT: process.env.EXECUTOR_CONTRACT || "0x83EF5c401fAa5B9674BAfAcFb089b30bAc67C9A0",
     BENEFICIARY: process.env.BENEFICIARY || "0x4B8251e7c80F910305bb81547e301DcB8A596918",
     
-    // 🚦 TRAFFIC CONTROL (v65.5 Optimized)
+    // 🚦 TRAFFIC CONTROL (v65.6 Optimized)
     MAX_CORES: Math.min(os.cpus().length, 12), 
     WORKER_BOOT_DELAY_MS: 15000, 
     RPC_COOLDOWN_MS: 15000,
@@ -55,7 +65,7 @@ const GLOBAL_CONFIG = {
     LEVIATHAN_MIN_ETH: parseEther("10.0"),
     GAS_LIMIT: 1250000n,
     MARGIN_ETH: "0.015",
-    PRIORITY_BRIBE: 15n, // 15% Tip for standard txs
+    PRIORITY_BRIBE: 15n,
 
     NETWORKS: [
         {
@@ -97,12 +107,19 @@ if (cluster.isPrimary) {
     console.clear();
     console.log(`${TXT.bold}${TXT.gold}
 ╔════════════════════════════════════════════════════════╗
-║   ⚡ APEX TITAN v65.5 | ULTIMATE CLUSTER MERGE        ║
-║   MODE: OMNISCIENT + FLASHBOTS + SHARED LISTENERS     ║
+║   ⚡ APEX TITAN v65.6 | STABILIZED ORCHESTRATOR       ║
+║   MODE: OMNISCIENT + FLASHBOTS + CREDENTIAL SYNC      ║
 ╚════════════════════════════════════════════════════════╝${TXT.reset}`);
 
+    // Pre-flight check for placeholders
+    const isMissingKeys = GLOBAL_CONFIG.NETWORKS.some(n => n.wss.includes("YOUR_KEY") || n.rpc.includes("YOUR_KEY"));
+    if (isMissingKeys) {
+        console.log(`${TXT.red}${TXT.bold}[CRITICAL] Default 'YOUR_KEY' detected in configurations.${TXT.reset}`);
+        console.log(`${TXT.yellow}Please ensure ETH_RPC, ETH_WSS, and PRIVATE_KEY are set in .env${TXT.reset}\n`);
+    }
+
     const cpuCount = GLOBAL_CONFIG.MAX_CORES;
-    console.log(`${TXT.cyan}[SYSTEM] Initializing Optimized ${cpuCount}-Core Fleet...${TXT.reset}`);
+    console.log(`${TXT.cyan}[SYSTEM] Initializing ${cpuCount}-Core Fleet...${TXT.reset}`);
 
     const workers = [];
     const spawnWorker = (i) => {
@@ -138,7 +155,6 @@ else {
 
 async function initWorker(CHAIN) {
     const TAG = `${CHAIN.color}[${CHAIN.name}]${TXT.reset}`;
-    // Shared Listener: Cores 1-3 listen, others strike
     const IS_LISTENER = (cluster.worker.id <= 3);
     const ROLE = IS_LISTENER ? "LISTENER" : "STRIKER";
     
@@ -146,27 +162,30 @@ async function initWorker(CHAIN) {
     let currentEthPrice = 0;
     const walletKey = (process.env.PRIVATE_KEY || "").trim();
 
-    // 1. HEALTH SERVER (v26.1)
-    try {
-        const server = http.createServer((req, res) => {
-            if (req.url === '/status') {
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ status: "ONLINE", role: ROLE, chain: CHAIN.name }));
-            } else { res.writeHead(404); res.end(); }
-        });
-        server.on('error', () => {});
-        server.listen(GLOBAL_CONFIG.PORT + cluster.worker.id); 
-    } catch (e) {}
+    if (!walletKey || walletKey.includes("0000000")) {
+        console.error(`${TAG} ${TXT.red}Fatal: No Private Key found.${TXT.reset}`);
+        return;
+    }
 
     async function safeConnect() {
         try {
+            // Prevent 401 by validating keys before connecting
+            if (CHAIN.wss.includes("YOUR_KEY") || CHAIN.rpc.includes("YOUR_KEY")) {
+                console.error(`${TAG} ${TXT.red}AUTH FAILED: API key is placeholder.${TXT.reset}`);
+                return;
+            }
+
             const netObj = ethers.Network.from(CHAIN.chainId);
-            const provider = new JsonRpcProvider(CHAIN.rpc, netObj, { staticNetwork: true, batchMaxCount: 1 });
+            const provider = new JsonRpcProvider(CHAIN.rpc, netObj, { staticNetwork: true });
             const wsProvider = IS_LISTENER ? new WebSocketProvider(CHAIN.wss, netObj) : null;
             
             if (wsProvider) {
                 wsProvider.on('error', (e) => {
-                    if (e.message.includes("429")) process.stdout.write(`${TXT.red}!${TXT.reset}`);
+                    if (e.message.includes("401")) {
+                        console.error(`${TAG} ${TXT.red}Invalid API Key (401).${TXT.reset}`);
+                    } else if (e.message.includes("429")) {
+                        process.stdout.write(`${TXT.red}!${TXT.reset}`);
+                    }
                 });
                 if (wsProvider.websocket) {
                     wsProvider.websocket.onclose = () => setTimeout(safeConnect, 60000);
@@ -176,7 +195,6 @@ async function initWorker(CHAIN) {
             const wallet = new Wallet(walletKey, provider);
             const priceFeed = new Contract(CHAIN.priceFeed, ["function latestRoundData() view returns (uint80,int256,uint256,uint80,uint80)"], provider);
 
-            // FLASHBOTS PROVIDER (v26.1)
             let fbProvider = null;
             if (CHAIN.type === "FLASHBOTS" && hasFlashbots) {
                 try {
@@ -184,7 +202,6 @@ async function initWorker(CHAIN) {
                 } catch (e) {}
             }
 
-            // Heartbeat & Price Sync
             setInterval(async () => {
                 if (isProcessing) return;
                 try {
@@ -200,7 +217,6 @@ async function initWorker(CHAIN) {
 
             console.log(`${TXT.green}✅ CORE ${cluster.worker.id} ${ROLE} SYNCED on ${TAG}${TXT.reset}`);
 
-            // --- IPC HANDLER ---
             process.on('message', async (msg) => {
                 if (msg.type === 'WHALE_SIGNAL' && msg.chainId === CHAIN.chainId && !isProcessing) {
                     isProcessing = true;
@@ -210,7 +226,6 @@ async function initWorker(CHAIN) {
             });
 
             if (IS_LISTENER && wsProvider) {
-                // MEMPOOL SNIPER
                 wsProvider.on("pending", async (txHash) => {
                     if (isProcessing) return;
                     try {
@@ -229,7 +244,6 @@ async function initWorker(CHAIN) {
                     } catch (err) {}
                 });
 
-                // LEVIATHAN LOG DECODER
                 const swapTopic = ethers.id("Swap(address,uint256,uint256,uint256,uint256,address)");
                 wsProvider.on({ topics: [swapTopic] }, async (log) => {
                     if (isProcessing) return;
@@ -239,20 +253,12 @@ async function initWorker(CHAIN) {
                         if (maxVal >= GLOBAL_CONFIG.LEVIATHAN_MIN_ETH) {
                             process.send({ type: 'WHALE_SIGNAL', chainId: CHAIN.chainId, target: log.address });
                             isProcessing = true;
-                            console.log(`\n${TAG} ${TXT.yellow}🐳 LEVIATHAN LOG: ${formatEther(maxVal)} ETH verified!${TXT.reset}`);
+                            console.log(`\n${TAG} ${TXT.yellow}🐳 LEVIATHAN LOG: ${formatEther(maxVal)} ETH confirmed!${TXT.reset}`);
                             await strike(provider, wallet, fbProvider, apexIface, CHAIN, log.address, "LEVIATHAN_STRIKE");
                             setTimeout(() => isProcessing = false, GLOBAL_CONFIG.RPC_COOLDOWN_MS);
                         }
                     } catch (e) {}
                 });
-
-                // TRIANGLE VOLATILITY PROBE (v26.1)
-                setInterval(async () => {
-                    if (isProcessing) return;
-                    isProcessing = true;
-                    await strike(provider, wallet, fbProvider, apexIface, CHAIN, "0x...", "TRIANGLE_PROBE");
-                    setTimeout(() => isProcessing = false, GLOBAL_CONFIG.RPC_COOLDOWN_MS);
-                }, 45000 + (Math.random() * 30000));
             }
         } catch (e) {
             setTimeout(safeConnect, 30000);
@@ -266,7 +272,7 @@ async function strike(provider, wallet, fbProvider, iface, CHAIN, target, mode) 
     try {
         let txData;
         if (mode === "TRIANGLE_PROBE") {
-            const path = [CHAIN.weth, "0x...", "0x...", CHAIN.weth]; // Placeholder
+            const path = [CHAIN.weth, "0x...", "0x...", CHAIN.weth]; 
             txData = iface.encodeFunctionData("executeTriangle", [path, parseEther("25")]);
         } else {
             txData = iface.encodeFunctionData("executeFlashArbitrage", [CHAIN.weth, target, 0]);
